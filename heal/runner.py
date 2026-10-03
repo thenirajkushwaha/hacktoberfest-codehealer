@@ -5,8 +5,10 @@ Executes target Python scripts in isolated child processes and categorizes error
 
 from dataclasses import dataclass
 from enum import Enum
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -97,11 +99,19 @@ def classify_error(stderr: str, returncode: int, cwd: Optional[Path] = None) -> 
 
     detected_file, detected_line = detect_file_and_line(stderr, cwd)
 
+    # Check POSIX signals (especially for compiled C, C++, Rust, Go)
+    if returncode in [-8, 136]:
+        return ErrorCategory.RUNTIME_EXCEPTION, "FloatingPointException (SIGFPE)", "Process crashed with SIGFPE (division by zero or arithmetic overflow)", detected_line, detected_file
+    elif returncode in [-11, 139]:
+        return ErrorCategory.RUNTIME_EXCEPTION, "SegmentationFault (SIGSEGV)", "Process crashed with SIGSEGV (segmentation fault / null pointer)", detected_line, detected_file
+    elif returncode in [-6, 134]:
+        return ErrorCategory.RUNTIME_EXCEPTION, "Abort (SIGABRT)", "Process aborted (assertion failure or std::terminate)", detected_line, detected_file
+
     if not stderr.strip():
         return ErrorCategory.UNKNOWN_ERROR, "NonZeroExitCode", f"Process exited with code {returncode}", None, detected_file
 
     # Check for SyntaxError / Compiler Error (Rust, Go, GCC, Clang, TS)
-    if any(keyword in stderr for keyword in ["error[E", "SyntaxError", "syntax error", "IndentationError", "expected ';'", "undeclared"]):
+    if any(keyword in stderr for keyword in ["error[E", "SyntaxError", "syntax error", "IndentationError", "expected ';'", "undeclared", "error:"]):
         syntax_match = re.search(r"((?:SyntaxError|IndentationError|error\[E\d+\]|error):\s*(.+))", stderr)
         err_type = syntax_match.group(1).split(":")[0].strip() if syntax_match else "CompilerError"
         err_msg = syntax_match.group(2).strip() if syntax_match else stderr.strip().splitlines()[0]
@@ -177,12 +187,62 @@ def run_script(
     if not script_path.exists():
         raise FileNotFoundError(f"Target script '{script_path}' does not exist.")
 
-    cmd = resolve_script_command(script_path)
-    if args:
-        cmd.extend(args)
-
     work_dir = cwd or script_path.parent
     start_time = time.perf_counter()
+
+    ext = script_path.suffix.lower()
+    temp_bin = None
+    if ext in [".cpp", ".cc", ".cxx", ".c"]:
+        compiler = "g++" if ext != ".c" else "gcc"
+        if not shutil.which(compiler):
+            raise FileNotFoundError(f"Compiler '{compiler}' is not found on your system.")
+        temp_bin = script_path.parent / f".heal_bin_{script_path.stem}_{os.getpid()}"
+        compile_cmd = [compiler, "-O0", str(script_path), "-o", str(temp_bin)]
+        c_proc = subprocess.run(compile_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, cwd=work_dir)
+        if c_proc.returncode != 0:
+            duration = time.perf_counter() - start_time
+            err_cat, err_type, err_msg, line_num, detected_file = classify_error(c_proc.stderr, c_proc.returncode, cwd=work_dir)
+            return ExecutionResult(
+                script_path=script_path,
+                returncode=c_proc.returncode,
+                stdout=c_proc.stdout,
+                stderr=c_proc.stderr,
+                success=False,
+                error_category=err_cat,
+                error_type=err_type or "CompilationError",
+                error_message=err_msg,
+                error_line=line_num,
+                detected_file=detected_file or script_path,
+                duration=duration,
+            )
+        cmd = [str(temp_bin)]
+    elif ext == ".rs":
+        if not shutil.which("rustc"):
+            raise FileNotFoundError("Rust compiler 'rustc' is not found on your system.")
+        temp_bin = script_path.parent / f".heal_bin_{script_path.stem}_{os.getpid()}"
+        c_proc = subprocess.run(["rustc", str(script_path), "-o", str(temp_bin)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, cwd=work_dir)
+        if c_proc.returncode != 0:
+            duration = time.perf_counter() - start_time
+            err_cat, err_type, err_msg, line_num, detected_file = classify_error(c_proc.stderr, c_proc.returncode, cwd=work_dir)
+            return ExecutionResult(
+                script_path=script_path,
+                returncode=c_proc.returncode,
+                stdout=c_proc.stdout,
+                stderr=c_proc.stderr,
+                success=False,
+                error_category=err_cat,
+                error_type=err_type or "RustcCompilationError",
+                error_message=err_msg,
+                error_line=line_num,
+                detected_file=detected_file or script_path,
+                duration=duration,
+            )
+        cmd = [str(temp_bin)]
+    else:
+        cmd = resolve_script_command(script_path)
+
+    if args:
+        cmd.extend(args)
 
     try:
         proc = subprocess.run(
@@ -240,6 +300,12 @@ def run_script(
             error_message=f"Script execution exceeded timeout limit ({timeout}s)",
             duration=duration,
         )
+    finally:
+        if temp_bin and temp_bin.exists():
+            try:
+                temp_bin.unlink()
+            except OSError:
+                pass
 
 
 def run_command_job(

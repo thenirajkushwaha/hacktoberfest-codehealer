@@ -14,7 +14,8 @@ from heal.agent import (
 )
 
 
-def test_missing_api_key():
+def test_missing_api_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     agent = HealingAgent(api_key="")
     with pytest.raises(MissingAPIKeyError):
         agent._get_client()

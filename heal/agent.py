@@ -92,23 +92,39 @@ class HealingAgent:
         # Build prompt instructions
         prompt_parts = []
 
+        ext_map = {
+            ".py": "python",
+            ".cpp": "cpp",
+            ".cc": "cpp",
+            ".c": "c",
+            ".rs": "rust",
+            ".go": "go",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".java": "java",
+            ".sh": "bash",
+            ".rb": "ruby",
+        }
+        lang = ext_map.get(script_path.suffix.lower(), "python")
+
         system_prompt = (
             "You are an elite autonomous debugging and self-healing systems engineer. "
-            "Your task is to fix broken Python scripts so they execute with exit code 0. "
+            f"Your task is to fix broken {lang.upper()} files so they compile and execute with exit code 0. "
             "\nSTRICT OUTPUT REQUIREMENTS:\n"
-            "1. Output ONLY the complete, corrected Python script inside a single ```python ... ``` markdown block.\n"
+            f"1. Output ONLY the complete, corrected {lang.upper()} source code inside a single ```{lang} ... ``` markdown block.\n"
             "2. Do NOT write conversational preamble, introductory text, explanations, or commentary outside the code block.\n"
             "3. Ensure the repaired code preserves the original logic, fixes all runtime/syntax errors, and handles edge cases."
         )
 
         user_content = [
             f"### Target File: {script_path.name}\n",
+            f"### Language: {lang.upper()}\n",
             f"### Execution Attempt: {attempt} of {max_retries}\n",
             f"### Error Category: {error_category}\n",
             f"### Process Exit Code: {returncode}\n\n",
-            "### Current Python Source Code:\n",
-            f"```python\n{script_code}\n```\n\n",
-            "### Captured STDERR & Crash Traceback:\n",
+            f"### Current {lang.upper()} Source Code:\n",
+            f"```{lang}\n{script_code}\n```\n\n",
+            "### Captured STDERR & Crash Traceback / Compiler Output:\n",
             f"```text\n{stderr.strip() if stderr.strip() else '(No stderr output)'}\n```\n\n",
         ]
 
@@ -132,7 +148,7 @@ class HealingAgent:
             )
 
         user_content.append(
-            "Synthesize and output the entire corrected Python script now inside a ```python``` block:"
+            f"Synthesize and output the entire corrected {lang.upper()} code now inside a ```{lang}``` block:"
         )
 
         combined_text = "".join(user_content)

@@ -205,8 +205,8 @@ def run(
                     previous_attempts=previous_attempt_errors,
                 )
 
-            # Extract clean validated Python source
-            new_code = extract_code(response_text)
+            # Extract clean validated source
+            new_code = extract_code(response_text, filename=script.name)
 
         except MissingAPIKeyError as e:
             console.print(Panel(f"[bold red]{e}[/bold red]", title="Configuration Error", border_style="red"))

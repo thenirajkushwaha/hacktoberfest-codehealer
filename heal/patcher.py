@@ -75,40 +75,50 @@ def restore_backup(script_path: Path) -> Tuple[bool, Optional[str]]:
     return False, f"No backup file found for {script_path.name}"
 
 
-def extract_code(raw_response: str) -> str:
+def extract_code(raw_response: str, filename: Optional[str] = None) -> str:
     """
-    Extracts clean Python code from Gemma's response.
-    Expects markdown code blocks (```python ... ``` or ``` ... ```).
-    Strips markdown artifacts, comments, and validates syntax with ast.parse.
+    Extracts clean source code from Gemma's response.
+    Expects markdown code blocks (```cpp ... ```, ```python ... ```, etc.).
+    Validates Python syntax with ast.parse if target is a Python file.
     """
     if not raw_response or not raw_response.strip():
         raise PatchError("Model returned an empty response.")
 
     text = raw_response.strip()
 
-    # Pattern for code fences: ```python\n...\n``` or ```py\n...\n``` or ```\n...\n```
+    # Pattern for code fences: ```<lang>\n...\n``` or generic ```\n...\n```
     code_block_pattern = re.compile(
-        r"```(?:python|py)?\r?\n(.*?)```",
+        r"```(?:[a-zA-Z0-9_+-]+)?\r?\n(.*?)```",
         re.DOTALL | re.IGNORECASE,
     )
 
     matches = code_block_pattern.findall(text)
     if matches:
-        # Choose the longest matching block if multiple are found
         candidate = max(matches, key=len).strip()
     else:
-        # If no code block fence found, test if the text itself is raw code
         lines = text.splitlines()
         filtered = [l for l in lines if not l.strip().startswith("```")]
         candidate = "\n".join(filtered).strip()
 
-    # Validate Python syntax using ast.parse
-    try:
-        ast.parse(candidate)
-    except SyntaxError as e:
-        raise PatchError(
-            f"Generated patch contains invalid Python syntax at line {e.lineno}: {e.msg}"
-        ) from e
+    if not candidate:
+        raise PatchError("Extracted code snippet is empty.")
+
+    # Validate syntax if target is a Python file
+    is_python = filename.endswith(".py") if filename else True
+    if is_python:
+        try:
+            ast.parse(candidate)
+        except SyntaxError as e:
+            if filename and filename.endswith(".py"):
+                raise PatchError(
+                    f"Generated patch contains invalid Python syntax at line {e.lineno}: {e.msg}"
+                ) from e
+    else:
+        # For non-Python languages (C++, Rust, Go, JS), check balanced braces
+        open_braces = candidate.count("{")
+        close_braces = candidate.count("}")
+        if abs(open_braces - close_braces) > 2:
+            raise PatchError("Extracted code appears truncated (unbalanced curly braces).")
 
     return candidate
 
