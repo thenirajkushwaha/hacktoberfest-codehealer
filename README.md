@@ -96,19 +96,6 @@ flowchart TD
     Rollback --> FailExit["❌ Exit code 1 (Original code preserved)"]
 ```
 
----
-
-## 🏆 Hackathon Tracks & Sponsor Alignment
-
-| Track / Sponsor Challenge | Project Implementation & Proof of Alignment |
-| :--- | :--- |
-| **🥇 Main Track: Open-Source AI & Autonomous Agents** | Full closed-loop lifecycle: Execute → Intercept → Reason → Patch → Re-evaluate → Verify. Configurable retry budget (`--max-retries 3`) with deterministic automatic rollback on failure. |
-| **💎 Sponsor Challenge: Best Use of Gemma** | Direct integration with Gemma models (`gemma-2-27b-it`, `gemma-2-9b-it`) via the official `google-genai` SDK following Google's Gemma Cookbook patterns. Supports multimodal diagnosis via `--image` for visual errors. |
-| **🌟 Sponsor Challenge: Best Open-Source AI Project** | Fully compliant **Apache License 2.0**, modern `pyproject.toml` packaging, containerized `Dockerfile` for DigitalOcean, `render.yaml` specification, and 100% test coverage. |
-| **🗣️ Sponsor Challenge: Best Use of ElevenLabs** | Low-latency voice telemetry module (`heal/voice.py`) with `--voice` flag narrating caught exceptions, reasoning steps, and verified completions. Silently degrades to text mode if API key is absent. |
-
----
-
 ## 📦 Installation & Quickstart
 
 ### 1. Prerequisites
