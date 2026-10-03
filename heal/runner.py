@@ -24,7 +24,7 @@ class ErrorCategory(str, Enum):
 
 @dataclass
 class ExecutionResult:
-    script_path: Path
+    script_path: Optional[Path]
     returncode: int
     stdout: str
     stderr: str
@@ -33,6 +33,7 @@ class ExecutionResult:
     error_type: Optional[str] = None
     error_message: Optional[str] = None
     error_line: Optional[int] = None
+    detected_file: Optional[Path] = None
     duration: float = 0.0
 
     @property
@@ -45,48 +46,121 @@ class ExecutionResult:
         return "\n\n".join(out)
 
 
-def classify_error(stderr: str, returncode: int) -> tuple[ErrorCategory, Optional[str], Optional[str], Optional[int]]:
+def detect_file_and_line(text: str, cwd: Optional[Path] = None) -> tuple[Optional[Path], Optional[int]]:
     """
-    Analyzes stderr to identify the error category, exception class, message, and line number.
+    Scans stderr for file paths and line numbers across multiple programming languages:
+    - GCC/Clang/Rustc/Go: path/to/file.ext:14:5:
+    - Python: File "path/to/file.py", line 14
+    - Node.js: at ... (path/to/file.js:14:5)
+    - Java: at ... (File.java:14)
+    """
+    base_dir = cwd or Path.cwd()
+
+    # Pattern 1: path/file.ext:12:34: error
+    colon_match = re.findall(r"([A-Za-z0-9_./\\-]+\.[a-zA-Z0-9]+):(\d+)(?::(\d+))?", text)
+    if colon_match:
+        for candidate_path, line_str, _ in reversed(colon_match):
+            p = Path(candidate_path)
+            if not p.is_absolute():
+                p = base_dir / p
+            if p.exists() and p.is_file():
+                return p, int(line_str)
+
+    # Pattern 2: Python File "...", line 12
+    py_match = re.findall(r'File\s+"(.*?)",\s+line\s+(\d+)', text)
+    if py_match:
+        cand_path, line_str = py_match[-1]
+        p = Path(cand_path)
+        if not p.is_absolute():
+            p = base_dir / p
+        return p, int(line_str)
+
+    # Pattern 3: Node.js at ... (path:12:34)
+    node_match = re.findall(r'\((.*?\.[a-zA-Z0-9]+):(\d+):(\d+)\)', text)
+    if node_match:
+        cand_path, line_str, _ = node_match[-1]
+        p = Path(cand_path)
+        if not p.is_absolute():
+            p = base_dir / p
+        return p, int(line_str)
+
+    return None, None
+
+
+def classify_error(stderr: str, returncode: int, cwd: Optional[Path] = None) -> tuple[ErrorCategory, Optional[str], Optional[str], Optional[int], Optional[Path]]:
+    """
+    Analyzes stderr to identify the error category, exception class, message, line number, and offending file.
+    Supports Python, Rust, Go, C/C++, JavaScript/TypeScript, and Java.
     """
     if returncode == 0:
-        return ErrorCategory.NONE, None, None, None
+        return ErrorCategory.NONE, None, None, None, None
+
+    detected_file, detected_line = detect_file_and_line(stderr, cwd)
 
     if not stderr.strip():
-        return ErrorCategory.UNKNOWN_ERROR, "NonZeroExitCode", f"Process exited with code {returncode}", None
+        return ErrorCategory.UNKNOWN_ERROR, "NonZeroExitCode", f"Process exited with code {returncode}", None, detected_file
 
-    # Check for SyntaxError / IndentationError
-    syntax_match = re.search(r"((?:SyntaxError|IndentationError|TabError):\s*(.+))", stderr)
-    if syntax_match:
-        line_match = re.search(r'File\s+".*?",\s+line\s+(\d+)', stderr)
-        line_num = int(line_match.group(1)) if line_match else None
-        err_type = syntax_match.group(1).split(":")[0].strip()
-        err_msg = syntax_match.group(2).strip()
-        return ErrorCategory.SYNTAX_ERROR, err_type, err_msg, line_num
+    # Check for SyntaxError / Compiler Error (Rust, Go, GCC, Clang, TS)
+    if any(keyword in stderr for keyword in ["error[E", "SyntaxError", "syntax error", "IndentationError", "expected ';'", "undeclared"]):
+        syntax_match = re.search(r"((?:SyntaxError|IndentationError|error\[E\d+\]|error):\s*(.+))", stderr)
+        err_type = syntax_match.group(1).split(":")[0].strip() if syntax_match else "CompilerError"
+        err_msg = syntax_match.group(2).strip() if syntax_match else stderr.strip().splitlines()[0]
+        return ErrorCategory.SYNTAX_ERROR, err_type, err_msg, detected_line, detected_file
 
-    # Check for ModuleNotFoundError / ImportError
-    import_match = re.search(r"((?:ModuleNotFoundError|ImportError):\s*(.+))", stderr)
-    if import_match:
-        err_type = import_match.group(1).split(":")[0].strip()
-        err_msg = import_match.group(2).strip()
-        line_match = re.findall(r'File\s+".*?",\s+line\s+(\d+)', stderr)
-        line_num = int(line_match[-1]) if line_match else None
-        return ErrorCategory.MISSING_DEPENDENCY, err_type, err_msg, line_num
+    # Check for ModuleNotFoundError / Missing Package (Python, Node, Rust crate, Go module)
+    if any(keyword in stderr for keyword in ["ModuleNotFoundError", "ImportError", "Cannot find module", "cannot find package", "unresolved import"]):
+        err_msg = stderr.strip().splitlines()[-1]
+        return ErrorCategory.MISSING_DEPENDENCY, "MissingDependencyError", err_msg, detected_line, detected_file
 
     # Generic Traceback / Runtime Exceptions
-    # Matches any standard Python exception at the end of traceback
-    exc_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Interrupt|Exit|Warning)):\s*(.*)", stderr)
+    exc_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Interrupt|Exit|Warning|panic)):\s*(.*)", stderr)
     if exc_match:
         err_type = exc_match.group(1).strip()
         err_msg = exc_match.group(2).strip()
-        # Find the last line number in the traceback (closest to crash point)
-        lines = re.findall(r'File\s+".*?",\s+line\s+(\d+)', stderr)
-        line_num = int(lines[-1]) if lines else None
-        return ErrorCategory.RUNTIME_EXCEPTION, err_type, err_msg, line_num
+        return ErrorCategory.RUNTIME_EXCEPTION, err_type, err_msg, detected_line, detected_file
 
-    # Fallback when traceback doesn't match standard regex
-    last_line = stderr.strip().splitlines()[-1] if stderr.strip().splitlines() else "Unknown failure"
-    return ErrorCategory.UNKNOWN_ERROR, "RuntimeError", last_line, None
+    # Fallback
+    last_line = stderr.strip().splitlines()[-1] if stderr.strip().splitlines() else f"Command failed with code {returncode}"
+    return ErrorCategory.UNKNOWN_ERROR, "ExecutionError", last_line, detected_line, detected_file
+
+
+def get_language_from_path(path: Path) -> str:
+    """Infers programming language name from file extension."""
+    ext_map = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".mjs": "javascript",
+        ".cjs": "javascript",
+        ".rs": "rust",
+        ".go": "go",
+        ".c": "c",
+        ".cpp": "cpp",
+        ".cc": "cpp",
+        ".java": "java",
+        ".sh": "bash",
+        ".rb": "ruby",
+    }
+    return ext_map.get(path.suffix.lower(), "python")
+
+
+def resolve_script_command(script_path: Path) -> List[str]:
+    """Generates the runner command based on file extension."""
+    ext = script_path.suffix.lower()
+    if ext == ".py":
+        return [sys.executable, str(script_path)]
+    elif ext in [".js", ".mjs", ".cjs"]:
+        return ["node", str(script_path)]
+    elif ext == ".ts":
+        return ["npx", "-y", "ts-node", str(script_path)]
+    elif ext == ".go":
+        return ["go", "run", str(script_path)]
+    elif ext == ".sh":
+        return ["bash", str(script_path)]
+    elif ext == ".rb":
+        return ["ruby", str(script_path)]
+    # Fallback to direct execution
+    return [str(script_path)]
 
 
 def run_script(
@@ -96,14 +170,14 @@ def run_script(
     cwd: Optional[Path] = None,
 ) -> ExecutionResult:
     """
-    Executes target script in an isolated child process using Python subprocess.run.
+    Executes target script in an isolated child process using polyglot resolution.
     Captures stdout, stderr, execution time, and categorizes failures.
     """
     script_path = Path(script_path).resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"Target script '{script_path}' does not exist.")
 
-    cmd = [sys.executable, str(script_path)]
+    cmd = resolve_script_command(script_path)
     if args:
         cmd.extend(args)
 
@@ -135,7 +209,7 @@ def run_script(
                 duration=duration,
             )
 
-        err_cat, err_type, err_msg, line_num = classify_error(stderr, returncode)
+        err_cat, err_type, err_msg, line_num, detected_file = classify_error(stderr, returncode, cwd=work_dir)
         return ExecutionResult(
             script_path=script_path,
             returncode=returncode,
@@ -146,6 +220,7 @@ def run_script(
             error_type=err_type,
             error_message=err_msg,
             error_line=line_num,
+            detected_file=detected_file or script_path,
             duration=duration,
         )
 
@@ -163,5 +238,78 @@ def run_script(
             error_category=ErrorCategory.TIMEOUT,
             error_type="TimeoutExpired",
             error_message=f"Script execution exceeded timeout limit ({timeout}s)",
+            duration=duration,
+        )
+
+
+def run_command_job(
+    command_str: str,
+    timeout: int = 60,
+    cwd: Optional[Path] = None,
+) -> ExecutionResult:
+    """
+    Executes an arbitrary shell command (e.g. 'npm test', 'cargo test', 'go test ./...').
+    Captures stdout, stderr, and extracts the offending file and line.
+    """
+    work_dir = cwd or Path.cwd()
+    start_time = time.perf_counter()
+
+    try:
+        proc = subprocess.run(
+            command_str,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            cwd=work_dir,
+        )
+        duration = time.perf_counter() - start_time
+        stdout = proc.stdout
+        stderr = proc.stderr
+        returncode = proc.returncode
+
+        if returncode == 0:
+            return ExecutionResult(
+                script_path=None,
+                returncode=0,
+                stdout=stdout,
+                stderr=stderr,
+                success=True,
+                error_category=ErrorCategory.NONE,
+                duration=duration,
+            )
+
+        combined_output = f"{stdout}\n{stderr}"
+        err_cat, err_type, err_msg, line_num, detected_file = classify_error(combined_output, returncode, cwd=work_dir)
+
+        return ExecutionResult(
+            script_path=detected_file,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            success=False,
+            error_category=err_cat,
+            error_type=err_type,
+            error_message=err_msg,
+            error_line=line_num,
+            detected_file=detected_file,
+            duration=duration,
+        )
+
+    except subprocess.TimeoutExpired as exc:
+        duration = time.perf_counter() - start_time
+        stdout = exc.stdout or "" if isinstance(exc.stdout, str) else (exc.stdout.decode() if exc.stdout else "")
+        stderr = exc.stderr or "" if isinstance(exc.stderr, str) else (exc.stderr.decode() if exc.stderr else "")
+        stderr += f"\nCommand execution timed out after {timeout} seconds."
+        return ExecutionResult(
+            script_path=None,
+            returncode=-1,
+            stdout=stdout,
+            stderr=stderr,
+            success=False,
+            error_category=ErrorCategory.TIMEOUT,
+            error_type="TimeoutExpired",
+            error_message=f"Command exceeded timeout limit ({timeout}s)",
             duration=duration,
         )
