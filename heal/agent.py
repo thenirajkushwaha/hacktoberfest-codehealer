@@ -26,9 +26,10 @@ class MissingAPIKeyError(HealingAgentException):
     pass
 
 
-# Default models: Gemma 2 27B for pure code text, Gemini 2.5 Flash for multimodal reasoning
-DEFAULT_TEXT_MODEL = os.environ.get("HEAL_TEXT_MODEL", "gemma-2-27b-it")
-DEFAULT_MULTIMODAL_MODEL = os.environ.get("HEAL_MULTIMODAL_MODEL", "gemini-2.5-flash")
+# Default models: Gemma 4 for code reasoning, Gemini 3.8 Flash for multimodal perception
+DEFAULT_TEXT_MODEL = os.environ.get("HEAL_TEXT_MODEL", "gemma-4-26b-a4b-it")
+DEFAULT_MULTIMODAL_MODEL = os.environ.get("HEAL_MULTIMODAL_MODEL", "gemini-3.8-flash")
+FALLBACK_TEXT_MODELS = ["gemma-4-26b-a4b-it", "gemma-4-31b-it", "gemini-3.8-flash"]
 
 
 class HealingAgent:
@@ -147,21 +148,33 @@ class HealingAgent:
 
         contents.append(f"{system_prompt}\n\n{combined_text}")
 
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-            )
-            if not response or not response.text:
-                raise HealingAgentException("Received empty response from the AI model.")
-            return response.text
-        except Exception as e:
-            if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
-                raise HealingAgentException(
-                    f"API Quota exceeded or rate limited while querying {model_name}: {e}"
-                ) from e
-            elif "NOT_FOUND" in str(e) or "404" in str(e):
-                raise HealingAgentException(
-                    f"Model '{model_name}' was not found. Try setting --model to an available model."
-                ) from e
-            raise HealingAgentException(f"AI generation failed ({model_name}): {e}") from e
+        # Candidate models to attempt
+        if self.custom_model:
+            candidate_models = [self.custom_model]
+        elif has_image:
+            candidate_models = [DEFAULT_MULTIMODAL_MODEL, "gemini-flash-latest"]
+        else:
+            candidate_models = FALLBACK_TEXT_MODELS
+
+        last_error = None
+        for candidate in candidate_models:
+            try:
+                response = client.models.generate_content(
+                    model=candidate,
+                    contents=contents,
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                last_error = e
+                err_str = str(e)
+                if "503" in err_str or "UNAVAILABLE" in err_str or "404" in err_str or "NOT_FOUND" in err_str:
+                    continue  # Try next available candidate model
+                elif "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+                    raise HealingAgentException(
+                        f"API Quota exceeded or rate limited while querying {candidate}: {e}"
+                    ) from e
+                else:
+                    raise HealingAgentException(f"AI generation failed ({candidate}): {e}") from e
+
+        raise HealingAgentException(f"All candidate models failed: {last_error}")
