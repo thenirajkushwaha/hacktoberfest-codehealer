@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heal-agent"
+version = "0.1.0"
+description = "Autonomous Self-Healing CLI Agent powered by Gemma & Gemini API with voice telemetry"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Heal Open Source Contributors", email = "hacktoberfest@heal.ai" }
+]
+keywords = [
+    "autonomous-agents",
+    "self-healing",
+    "gemma",
+    "gemini",
+    "debugging",
+    "hacktoberfest",
+    "elevenlabs",
+    "cli"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Bug Tracking",
+    "Topic :: Software Development :: Quality Assurance",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai>=2.0.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "pillow>=10.0.0",
+    "elevenlabs>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+heal = "heal.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/thenirajkushwaha/hacktoberfest-heal"
+Repository = "https://github.com/thenirajkushwaha/hacktoberfest-heal"
+Issues = "https://github.com/thenirajkushwaha/hacktoberfest-heal/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["heal*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
